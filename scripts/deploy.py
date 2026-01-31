@@ -1,186 +1,176 @@
-"""
-Deploy PersonaPlex model to SageMaker endpoint
-"""
-
 import os
 import time
+import json
 import boto3
-from sagemaker import get_execution_role, Session
-from sagemaker.model import Model
-from sagemaker.predictor import Predictor
-from sagemaker.serializers import JSONSerializer
-from sagemaker.deserializers import JSONDeserializer
 
-# Configuration
-REGION = os.environ.get("AWS_REGION", "us-east-1")
-ENDPOINT_NAME = "personaplex-7b-v1-endpoint"
-INSTANCE_TYPE = "ml.g5.12xlarge"  # 4x A10G GPUs, 96GB VRAM
-INSTANCE_COUNT = 1
+# ----------------------
+# CONFIG (with env overrides)
+# ----------------------
 
-# Read image URI from file (created by build script)
-with open("image_uri.txt", "r") as f:
-    IMAGE_URI = f.read().strip()
+REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Model data location (from prepare_model.py)
-MODEL_DATA_S3_URI = "s3://your-sagemaker-bucket/personaplex/models/model.tar.gz"
+ACCOUNT_ID = os.getenv("ACCOUNT_ID", "676164205626")
 
-# Initialize SageMaker session
-sagemaker_session = Session()
-role = get_execution_role()
+# ECR image URI written by build script, but can be overridden by env
+IMAGE_URI = os.getenv("IMAGE_URI")
+if IMAGE_URI is None:
+    with open("image_uri.txt", "r") as f:
+        IMAGE_URI = f.read().strip()
 
-print("Deployment Configuration:")
-print(f"  Region: {REGION}")
-print(f"  Role: {role}")
-print(f"  Image: {IMAGE_URI}")
-print(f"  Model Data: {MODEL_DATA_S3_URI}")
-print(f"  Instance Type: {INSTANCE_TYPE}")
-print(f"  Endpoint Name: {ENDPOINT_NAME}")
-print("")
-
-def create_model():
-    """Create SageMaker Model"""
-    print("Creating SageMaker Model...")
-    
-    model = Model(
-        image_uri=IMAGE_URI,
-        model_data=MODEL_DATA_S3_URI,
-        role=role,
-        sagemaker_session=sagemaker_session,
-        env={
-            'SAGEMAKER_PROGRAM': 'inference.py',
-            'SAGEMAKER_SUBMIT_DIRECTORY': '/opt/ml/code',
-            'SAGEMAKER_REGION': REGION,
-            # GPU optimizations
-            'OMP_NUM_THREADS': '1',
-            'NCCL_ASYNC_ERROR_HANDLING': '1'
-        }
-    )
-    
-    print(f"Model created: {model.name}")
-    return model
-
-def deploy_model(model):
-    """Deploy model to endpoint"""
-    print(f"\nDeploying to endpoint: {ENDPOINT_NAME}")
-    print("This will take 5-10 minutes...")
-    
-    start_time = time.time()
-    
-    predictor = model.deploy(
-        initial_instance_count=INSTANCE_COUNT,
-        instance_type=INSTANCE_TYPE,
-        endpoint_name=ENDPOINT_NAME,
-        serializer=JSONSerializer(),
-        deserializer=JSONDeserializer(),
-        wait=True,
-        # Container startup health check configuration
-        container_startup_health_check_timeout=600  # 10 minutes
-    )
-    
-    elapsed = time.time() - start_time
-    print(f"\n✓ Deployment successful! ({elapsed/60:.2f} minutes)")
-    print(f"✓ Endpoint name: {ENDPOINT_NAME}")
-    print(f"✓ Endpoint ARN: {predictor.endpoint_arn}")
-    
-    return predictor
-
-def test_endpoint(predictor):
-    """Test the deployed endpoint"""
-    print("\nTesting endpoint...")
-    
-    test_payload = {
-        "inputs": "Hello, how are you doing today?",
-        "parameters": {
-            "max_length": 100,
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "do_sample": True
-        }
-    }
-    
-    print(f"Input: {test_payload['inputs']}")
-    
-    response = predictor.predict(test_payload)
-    
-    print(f"\nResponse:")
-    print(f"  Generated text: {response['generated_text']}")
-    print(f"  Tokens: {response.get('num_tokens', 'N/A')}")
-    
-    return response
-
-def get_endpoint_info():
-    """Get endpoint details"""
-    sm_client = boto3.client('sagemaker', region_name=REGION)
-    
-    try:
-        response = sm_client.describe_endpoint(EndpointName=ENDPOINT_NAME)
-        
-        print("\n" + "="*60)
-        print("Endpoint Information:")
-        print("="*60)
-        print(f"  Name: {response['EndpointName']}")
-        print(f"  Status: {response['EndpointStatus']}")
-        print(f"  ARN: {response['EndpointArn']}")
-        print(f"  Instance Type: {INSTANCE_TYPE}")
-        print(f"  Instance Count: {INSTANCE_COUNT}")
-        print(f"  Created: {response['CreationTime']}")
-        print(f"  Last Modified: {response['LastModifiedTime']}")
-        print("="*60)
-        
-    except sm_client.exceptions.ClientError as e:
-        print(f"Endpoint not found: {e}")
-
-def main():
-    """Main deployment workflow"""
-    
-    # Check if endpoint already exists
-    sm_client = boto3.client('sagemaker', region_name=REGION)
-    
-    try:
-        existing = sm_client.describe_endpoint(EndpointName=ENDPOINT_NAME)
-        print(f"⚠️  Endpoint '{ENDPOINT_NAME}' already exists!")
-        print(f"   Status: {existing['EndpointStatus']}")
-        
-        response = input("Do you want to update it? (yes/no): ")
-        if response.lower() != 'yes':
-            print("Deployment cancelled.")
-            return
-        
-        print("\nUpdating existing endpoint...")
-        
-    except sm_client.exceptions.ClientError:
-        print("Creating new endpoint...")
-    
-    # Create and deploy model
-    model = create_model()
-    predictor = deploy_model(model)
-    
-    # Test endpoint
-    test_endpoint(predictor)
-    
-    # Show endpoint info
-    get_endpoint_info()
-    
-    print("\n✓ Deployment complete!")
-    print(f"\nTo use this endpoint in Python:")
-    print(f"""
-from sagemaker.predictor import Predictor
-from sagemaker.serializers import JSONSerializer
-from sagemaker.deserializers import JSONDeserializer
-
-predictor = Predictor(
-    endpoint_name='{ENDPOINT_NAME}',
-    serializer=JSONSerializer(),
-    deserializer=JSONDeserializer()
+# Model data in S3
+MODEL_DATA_S3_URI = os.getenv(
+    "MODEL_DATA_S3_URI",
+    "s3://676164205626-sagemaker-us-east-1/personaplex/models/model.tar.gz",
 )
 
-response = predictor.predict({{
-    "inputs": "Your text here",
-    "parameters": {{"max_length": 100, "temperature": 0.7}}
-}})
+# SageMaker execution role
+ROLE_ARN = os.getenv("SAGEMAKER_EXECUTION_ROLE_ARN")  # must be set
+if not ROLE_ARN:
+    raise RuntimeError(
+        "SAGEMAKER_EXECUTION_ROLE_ARN is not set. "
+        "Export it, e.g.:\n"
+        "  export SAGEMAKER_EXECUTION_ROLE_ARN=arn:aws:iam::676164205626:role/YourSageMakerExecutionRole"
+    )
 
-print(response['generated_text'])
-    """)
+# Names (can override via env)
+MODEL_NAME = os.getenv("SAGEMAKER_MODEL_NAME", "personaplex-7b-v1-model")
+ENDPOINT_CONFIG_NAME = os.getenv(
+    "SAGEMAKER_ENDPOINT_CONFIG_NAME", "personaplex-7b-v1-endpoint-config"
+)
+ENDPOINT_NAME = os.getenv("SAGEMAKER_ENDPOINT_NAME", "personaplex-7b-v1-endpoint")
+
+# Instance config
+INSTANCE_TYPE = os.getenv("SAGEMAKER_INSTANCE_TYPE", "ml.g5.8xlarge")
+INSTANCE_COUNT = int(os.getenv("SAGEMAKER_INSTANCE_COUNT", "1"))
+
+
+def create_model(sm_client):
+    print(f"Creating model: {MODEL_NAME}")
+
+    container_def = {
+        "Image": IMAGE_URI,
+        "ModelDataUrl": MODEL_DATA_S3_URI,
+        "Environment": {
+            "SAGEMAKER_PROGRAM": "inference.py",
+            "SAGEMAKER_SUBMIT_DIRECTORY": "/opt/ml/code",
+            "SAGEMAKER_REGION": REGION,
+            "OMP_NUM_THREADS": "1",
+            "NCCL_ASYNC_ERROR_HANDLING": "1",
+        },
+    }
+
+    try:
+        sm_client.describe_model(ModelName=MODEL_NAME)
+        print(f"Model {MODEL_NAME} already exists, skipping create.")
+    except sm_client.exceptions.ClientError:
+        sm_client.create_model(
+            ModelName=MODEL_NAME,
+            ExecutionRoleArn=ROLE_ARN,
+            PrimaryContainer=container_def,
+        )
+        print(f"Model {MODEL_NAME} created.")
+
+
+def create_endpoint_config(sm_client):
+    print(f"Creating endpoint config: {ENDPOINT_CONFIG_NAME}")
+
+    production_variant = {
+        "VariantName": "AllTraffic",
+        "ModelName": MODEL_NAME,
+        "InitialInstanceCount": INSTANCE_COUNT,
+        "InstanceType": INSTANCE_TYPE,
+        "InitialVariantWeight": 1.0,
+    }
+
+    try:
+        sm_client.describe_endpoint_config(EndpointConfigName=ENDPOINT_CONFIG_NAME)
+        print(f"Endpoint config {ENDPOINT_CONFIG_NAME} already exists, skipping create.")
+    except sm_client.exceptions.ClientError:
+        sm_client.create_endpoint_config(
+            EndpointConfigName=ENDPOINT_CONFIG_NAME,
+            ProductionVariants=[production_variant],
+        )
+        print(f"Endpoint config {ENDPOINT_CONFIG_NAME} created.")
+
+
+def create_or_update_endpoint(sm_client):
+    print(f"Creating/updating endpoint: {ENDPOINT_NAME}")
+
+    try:
+        resp = sm_client.describe_endpoint(EndpointName=ENDPOINT_NAME)
+        status = resp["EndpointStatus"]
+        print(f"Endpoint {ENDPOINT_NAME} exists with status {status}, updating config...")
+
+        sm_client.update_endpoint(
+            EndpointName=ENDPOINT_NAME,
+            EndpointConfigName=ENDPOINT_CONFIG_NAME,
+        )
+    except sm_client.exceptions.ClientError:
+        print(f"Endpoint {ENDPOINT_NAME} does not exist, creating...")
+        sm_client.create_endpoint(
+            EndpointName=ENDPOINT_NAME,
+            EndpointConfigName=ENDPOINT_CONFIG_NAME,
+        )
+
+    wait_for_endpoint(sm_client)
+
+
+def wait_for_endpoint(sm_client):
+    print("Waiting for endpoint to be InService...")
+    waiter = sm_client.get_waiter("endpoint_in_service")
+    start = time.time()
+    waiter.wait(EndpointName=ENDPOINT_NAME)
+    elapsed = (time.time() - start) / 60.0
+
+    resp = sm_client.describe_endpoint(EndpointName=ENDPOINT_NAME)
+    print(f"\nEndpoint status: {resp['EndpointStatus']}")
+    print(f"Deployment took {elapsed:.2f} minutes")
+
+
+def test_endpoint(rt_client):
+    print("\nTesting endpoint with a simple text prompt...")
+
+    payload = {
+        "inputs": "Hello, how are you today?",
+        "parameters": {
+            "max_length": 80,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "do_sample": True,
+        },
+    }
+
+    response = rt_client.invoke_endpoint(
+        EndpointName=ENDPOINT_NAME,
+        ContentType="application/json",
+        Body=json.dumps(payload),
+    )
+
+    body = response["Body"].read().decode("utf-8")
+    print("\nRaw response body:")
+    print(body)
+
+
+def main():
+    sm_client = boto3.client("sagemaker", region_name=REGION)
+    rt_client = boto3.client("sagemaker-runtime", region_name=REGION)
+
+    print("Configuration:")
+    print(f"  Region:        {REGION}")
+    print(f"  Role:          {ROLE_ARN}")
+    print(f"  Image URI:     {IMAGE_URI}")
+    print(f"  Model data:    {MODEL_DATA_S3_URI}")
+    print(f"  Model name:    {MODEL_NAME}")
+    print(f"  Endpoint name: {ENDPOINT_NAME}")
+    print(f"  Instance type: {INSTANCE_TYPE}")
+    print(f"  Instance count:{INSTANCE_COUNT}")
+    print("")
+
+    create_model(sm_client)
+    create_endpoint_config(sm_client)
+    create_or_update_endpoint(sm_client)
+    test_endpoint(rt_client)
+
 
 if __name__ == "__main__":
     main()
