@@ -1,39 +1,53 @@
-# Use SageMaker PyTorch 2.6 DLC with CUDA 12.4
-ARG REGION=us-east-1
-FROM 763104351884.dkr.ecr.${REGION}.amazonaws.com/pytorch-inference:2.6.0-gpu-py312-cu124-ubuntu22.04-sagemaker
+#!/bin/bash
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=TRUE \
-    PYTHONDONTWRITEBYTECODE=TRUE \
-    DEBIAN_FRONTEND=noninteractive
+# Configuration
+REGION=${AWS_REGION:-us-east-1}
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REPOSITORY_NAME="personaplex-sagemaker-inference"
+IMAGE_TAG="latest"
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libopus-dev \
-    ffmpeg \
-    libsndfile1 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Full image URI
+IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPOSITORY_NAME}:${IMAGE_TAG}"
 
-# Install Python dependencies for PersonaPlex
-RUN pip install --no-cache-dir \
-    transformers==4.36.0 \
-    accelerate==0.27.0 \
-    sentencepiece==0.1.99 \
-    librosa==0.10.1 \
-    soundfile==0.12.1 \
-    numpy==1.26.4 \
-    scipy==1.12.0
+echo "Building and pushing Docker image..."
+echo "Account: $ACCOUNT_ID"
+echo "Region: $REGION"
+echo "Image URI: $IMAGE_URI"
+echo ""
 
-# Copy inference code
-COPY inference.py /opt/ml/code/
+# Create ECR repository if it doesn't exist
+echo "Creating ECR repository..."
+aws ecr describe-repositories --repository-names ${REPOSITORY_NAME} --region ${REGION} || \
+    aws ecr create-repository --repository-name ${REPOSITORY_NAME} --region ${REGION}
 
-# Set working directory
-WORKDIR /opt/ml/code
+# Authenticate Docker to ECR
+echo "Authenticating Docker to ECR..."
+aws ecr get-login-password --region ${REGION} | \
+    docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
 
-# Tell SageMaker which script to use
-ENV SAGEMAKER_PROGRAM=inference.py
+# Build the Docker image
+echo "Building Docker image..."
+cd docker
+docker build \
+    --build-arg REGION=${REGION} \
+    --platform linux/amd64 \
+    -t ${REPOSITORY_NAME}:${IMAGE_TAG} \
+    -f Dockerfile .
 
-# Healthcheck (optional but recommended)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD python -c "import torch; assert torch.cuda.is_available()"
+# Tag the image
+echo "Tagging image..."
+docker tag ${REPOSITORY_NAME}:${IMAGE_TAG} ${IMAGE_URI}
+
+# Push to ECR
+echo "Pushing image to ECR..."
+docker push ${IMAGE_URI}
+
+echo ""
+echo "============================================"
+echo "Image successfully pushed!"
+echo "Image URI: ${IMAGE_URI}"
+echo "============================================"
+echo ""
+
+# Save image URI to file for deployment script
+echo ${IMAGE_URI} > ../image_uri.txt
